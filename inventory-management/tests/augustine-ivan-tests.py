@@ -1,3 +1,5 @@
+from datetime import date
+
 import pytest
 
 
@@ -411,6 +413,9 @@ def test_create_purchase_order_is_pending(client):
     order = _purchase_order(client, product, supplier)
     assert order["status"] == "pending"
     assert order["received_date"] is None
+    assert order["quantity_received"] is None
+    assert order["quantity_difference"] is None
+    assert order["clerk_id"] is None
     assert order["created_date"]
     assert _get_json(client, f"/purchase-orders/{order['id']}") == order
     assert _get_json(client, "/purchase-orders") == [order]
@@ -452,43 +457,77 @@ def test_get_nonexistent_po_returns_404(client):
     assert _get_json(client, "/purchase-orders") == [order]
 
 
-def test_receive_purchase_order_updates_stock(client):
+@pytest.mark.parametrize("quantity", [20, 25], ids=["full", "extra"])
+def test_receive_purchase_order_updates_stock(client, quantity):
     product = _product(client)
     order = _purchase_order(client, product, _supplier(client))
     url = f"/purchase-orders/{order['id']}"
-    response = client.put(f"{url}/receive")
+    response = client.put(f"{url}/receive", json={"quantity_received": quantity, "clerk_id": "C7"})
     assert response.status_code == 200
     received = response.get_json()
     assert received["status"] == "received"
     assert received["received_date"]
+    assert received["quantity_received"] == quantity
+    assert received["quantity_difference"] == 20 - quantity
+    assert received["clerk_id"] == "C7"
     assert _get_json(client, url) == received
-    _assert_receipt_transaction(client, order, 20)
-    _assert_stock(client, product, 30)
+    _assert_receipt_transaction(client, order, quantity)
+    _assert_stock(client, product, 10 + quantity)
 
 
 def test_receive_purchase_order_twice_rejected(client):
     product = _product(client)
     order = _purchase_order(client, product, _supplier(client))
     url = f"/purchase-orders/{order['id']}"
-    first = client.put(f"{url}/receive")
+    first = client.put(f"{url}/receive", json={"quantity_received": 20, "clerk_id": "C7"})
     assert first.status_code == 200
     history = _assert_receipt_transaction(client, order, 20)
     stock = _get_json(client, f"/products/{product['id']}")["quantity_on_hand"]
-    _assert_error(client.put(f"{url}/receive"), 400)
+    repeat = client.put(f"{url}/receive", json={"quantity_received": 5, "clerk_id": "C8"})
+    _assert_error(repeat, 400)
     assert _get_json(client, url) == first.get_json()
     assert _get_json(client, "/transactions") == history
     _assert_stock(client, product, stock)
 
 
 def test_receive_partial_purchase_order(client):
-    # quantity_received is assumed; partial receipts have no documented input format.
+    product = _product(client)
+    order = _purchase_order(client, product, _supplier(client), quantity=50)
+    url = f"/purchase-orders/{order['id']}"
+    response = client.put(f"{url}/receive", json={"quantity_received": 40, "clerk_id": "C7"})
+    assert response.status_code == 200
+    received = response.get_json()
+    assert received == order | {
+        "status": "received", "quantity_received": 40, "quantity_difference": 10,
+        "received_date": date.today().isoformat(), "clerk_id": "C7",
+    }
+    assert _get_json(client, url) == received
+    assert _get_json(client, "/purchase-orders") == [received]
+    _assert_stock(client, product, 50)
+    _assert_receipt_transaction(client, order, 40)
+
+
+@pytest.mark.parametrize("payload", [
+    {}, {"quantity_received": 0}, {"quantity_received": -5},
+    {"quantity_received": None}, {"quantity_received": "40"},
+    {"quantity_received": 1.5}, {"quantity_received": True}, [], None,
+], ids=["missing", "zero", "negative", "null", "text", "fraction", "boolean", "list", "no-body"])
+def test_receive_invalid_quantity_preserves_state(client, payload):
     product = _product(client)
     order = _purchase_order(client, product, _supplier(client))
     url = f"/purchase-orders/{order['id']}"
-    response = client.put(f"{url}/receive", json={"quantity_received": 7})
-    assert response.status_code == 200
-    received = response.get_json()
-    assert received["quantity_ordered"] == 20
-    assert _get_json(client, url) == received
-    _assert_stock(client, product, 17)
-    _assert_receipt_transaction(client, order, 7)
+    _assert_error(client.put(f"{url}/receive", json=payload), 400)
+    assert _get_json(client, url) == order
+    _assert_stock(client, product, 10)
+    assert _get_json(client, "/transactions") == []
+
+
+def test_receive_order_with_deleted_product_preserves_state(client):
+    product = _product(client)
+    order = _purchase_order(client, product, _supplier(client))
+    assert client.delete(f"/products/{product['id']}").status_code == 204
+    url = f"/purchase-orders/{order['id']}"
+    response = client.put(f"{url}/receive", json={"quantity_received": 20, "clerk_id": "C7"})
+    _assert_error(response, 404)
+    assert _get_json(client, url) == order
+    assert _get_json(client, "/transactions") == []

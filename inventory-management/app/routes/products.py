@@ -8,7 +8,14 @@ products_bp = Blueprint("products", __name__, url_prefix="/products")
 
 @products_bp.route("", methods=["GET"])
 def list_products():
-    return jsonify([p.to_dict() for p in store.products.values()])
+    products = list(store.products.values())
+    sku = request.args.get("sku")
+    name = request.args.get("name")
+    if sku is not None:
+        products = [p for p in products if p.sku == sku]
+    if name is not None:
+        products = [p for p in products if name.casefold() in p.name.casefold()]
+    return jsonify([p.to_dict() for p in products])
 
 
 @products_bp.route("/low-stock", methods=["GET"])

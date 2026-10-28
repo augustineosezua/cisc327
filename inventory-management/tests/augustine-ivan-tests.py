@@ -42,6 +42,11 @@ def _transaction(client, product, kind, quantity, supplier=None):
                    supplier_id=supplier["id"] if supplier else None)
 
 
+def _supplier(client, **changes):
+    data = dict(name="Lamp Supplier", contact_email="lamps@example.com")
+    return _create(client, "/suppliers", **(data | changes))
+
+
 # Home page
 
 def test_home_page_links_to_all_sections(client):
@@ -264,3 +269,121 @@ def test_record_transaction_via_ui_form(client):
     history = _get_json(client, "/transactions")
     assert len(history) == 1
     assert {key: history[0][key] for key in data} == data | {"supplier_id": None}
+
+
+# Suppliers
+
+def test_list_suppliers_returns_all_created(client):
+    first = _supplier(client)
+    second = _supplier(client, name="Chair Supplier", contact_email="chairs@example.com")
+    suppliers = _get_json(client, "/suppliers")
+    assert sorted(suppliers, key=lambda item: item["id"]) == [first, second]
+
+
+def test_get_nonexistent_supplier_returns_404(client):
+    existing = _supplier(client)
+    _assert_error(client.get("/suppliers/9999"), 404)
+    assert _get_json(client, "/suppliers") == [existing]
+
+
+def test_create_supplier_persists_fields(client):
+    supplier = _supplier(client)
+    assert _get_json(client, f"/suppliers/{supplier['id']}") == supplier
+
+
+def test_create_supplier_via_ui_form(client):
+    payload = {"name": "Form Supplier", "contact_email": "form@example.com"}
+    response = client.post("/ui/suppliers", data=payload, follow_redirects=True)
+    assert response.status_code == 200
+    assert "Form Supplier" in response.get_data(as_text=True)
+    suppliers = _get_json(client, "/suppliers")
+    assert len(suppliers) == 1
+    supplier = suppliers[0]
+    assert supplier == {"id": supplier["id"], **payload}
+    assert _get_json(client, f"/suppliers/{supplier['id']}") == supplier
+
+
+def test_create_supplier_missing_email_rejected(client, monkeypatch):
+    existing = _supplier(client)
+    monkeypatch.setitem(client.application.config, "PROPAGATE_EXCEPTIONS", False)
+    response = client.post("/suppliers", json={"name": "Missing Email"})
+    _assert_error(response, 400)
+    assert _get_json(client, "/suppliers") == [existing]
+
+
+def test_update_supplier_changes_only_given_fields(client):
+    supplier = _supplier(client)
+    expected = {**supplier, "name": "Renamed Supplier"}
+    response = client.put(f"/suppliers/{supplier['id']}", json={"name": expected["name"]})
+    assert response.status_code == 200
+    assert response.get_json() == expected
+    assert _get_json(client, f"/suppliers/{supplier['id']}") == expected
+
+
+def test_delete_supplier_removes_it(client):
+    supplier = _supplier(client)
+    other = _supplier(client, name="Other Supplier", contact_email="other@example.com")
+    response = client.delete(f"/suppliers/{supplier['id']}")
+    assert response.status_code == 204
+    _assert_error(client.get(f"/suppliers/{supplier['id']}"), 404)
+    assert _get_json(client, "/suppliers") == [other]
+
+
+def test_delete_nonexistent_supplier_returns_404(client):
+    existing = _supplier(client)
+    _assert_error(client.delete("/suppliers/9999"), 404)
+    assert _get_json(client, "/suppliers") == [existing]
+
+
+def test_supplier_products_lists_received_products(client):
+    supplier = _supplier(client)
+    other_supplier = _supplier(client, name="Other", contact_email="other@example.com")
+    delivered = _product(client)
+    other_delivery = _product(client, sku="OTHER-002")
+    out_only = _product(client, sku="OUT-003")
+    _transaction(client, delivered, "IN", 3, supplier)
+    _transaction(client, delivered, "IN", 2, supplier)
+    _transaction(client, other_delivery, "IN", 4, other_supplier)
+    _transaction(client, out_only, "OUT", 1, supplier)
+    assert _get_json(client, f"/suppliers/{supplier['id']}/products") == [
+        {**delivered, "quantity_on_hand": 15},
+    ]
+
+
+def test_supplier_products_empty_when_no_deliveries(client):
+    supplier = _supplier(client)
+    other = _supplier(client, name="Other", contact_email="other@example.com")
+    product = _product(client)
+    _transaction(client, product, "IN", 3, other)
+    assert _get_json(client, f"/suppliers/{supplier['id']}/products") == []
+    assert _get_json(client, f"/suppliers/{supplier['id']}") == supplier
+
+
+# Transaction lookup
+
+def test_filter_transactions_by_supplier(client):
+    supplier = _supplier(client)
+    other = _supplier(client, name="Other", contact_email="other@example.com")
+    product = _product(client)
+    first = _transaction(client, product, "IN", 3, supplier)
+    unrelated = _transaction(client, product, "IN", 4, other)
+    second = _transaction(client, product, "IN", 2, supplier)
+    results = _get_json(client, "/transactions", query_string={"supplier_id": supplier["id"]})
+    assert results == [first, second]
+    assert _get_json(client, "/transactions") == [first, unrelated, second]
+
+
+def test_filter_transactions_by_product(client):
+    product = _product(client)
+    other_product = _product(client, sku="OTHER-002")
+    first_supplier = _supplier(client)
+    second_supplier = _supplier(client, name="Other", contact_email="other@example.com")
+    # Cross IDs to catch filtering on supplier_id instead of product_id.
+    assert product["id"] != second_supplier["id"]
+    assert product["id"] == first_supplier["id"]
+    first = _transaction(client, product, "IN", 3, second_supplier)
+    unrelated = _transaction(client, other_product, "IN", 4, first_supplier)
+    second = _transaction(client, product, "OUT", 2)
+    results = _get_json(client, "/transactions", query_string={"product_id": product["id"]})
+    assert results == [first, second]
+    assert _get_json(client, "/transactions") == [first, unrelated, second]

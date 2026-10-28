@@ -27,6 +27,21 @@ def _product(client, **changes):
     return _create(client, "/products", **(data | changes))
 
 
+def _assert_stock(client, product, quantity):
+    assert _get_json(client, f"/products/{product['id']}/stock-level") == {
+        "product_id": product["id"], "quantity_on_hand": quantity,
+    }
+    assert _get_json(client, f"/products/{product['id']}") == {
+        **product, "quantity_on_hand": quantity,
+    }
+
+
+def _transaction(client, product, kind, quantity, supplier=None):
+    return _create(client, "/transactions", product_id=product["id"],
+                   type=kind, quantity=quantity,
+                   supplier_id=supplier["id"] if supplier else None)
+
+
 # Home page
 
 def test_home_page_links_to_all_sections(client):
@@ -134,3 +149,118 @@ def test_delete_product_twice_returns_404(client):
     assert client.delete(url).status_code == 204
     _assert_error(client.delete(url), 404)
     assert _get_json(client, "/products") == []
+
+
+# Stock level and low stock
+
+def test_stock_level_matches_product_quantity(client):
+    product = _product(client, quantity_on_hand=25)
+    _assert_stock(client, product, 25)
+
+
+def test_stock_level_nonexistent_product_404(client):
+    product = _product(client)
+    _assert_error(client.get("/products/9999/stock-level"), 404)
+    _assert_stock(client, product, 10)
+
+
+def test_low_stock_includes_product_at_threshold(client):
+    at_threshold = _product(client, quantity_on_hand=5, reorder_level=5)
+    below = _product(client, sku="LOW-002", quantity_on_hand=4, reorder_level=5)
+    flagged = _get_json(client, "/products/low-stock")
+    assert sorted(flagged, key=lambda item: item["id"]) == [at_threshold, below]
+
+
+def test_low_stock_excludes_product_above_threshold(client):
+    above = _product(client, quantity_on_hand=6, reorder_level=5)
+    low = _product(client, sku="LOW-002", quantity_on_hand=1, reorder_level=5)
+    assert _get_json(client, "/products/low-stock") == [low]
+    _assert_stock(client, above, 6)
+
+
+def test_low_stock_updates_after_removal(client):
+    product = _product(client, quantity_on_hand=7, reorder_level=5)
+    assert _get_json(client, "/products/low-stock") == []
+    transaction = _transaction(client, product, "OUT", 2)
+    assert _get_json(client, "/products/low-stock") == [
+        {**product, "quantity_on_hand": 5},
+    ]
+    _assert_stock(client, product, 5)
+    assert _get_json(client, "/transactions") == [transaction]
+
+
+# Stock movements
+
+def test_stock_increases_after_in_transaction(client):
+    product = _product(client)
+    other = _product(client, sku="OTHER-002")
+    transaction = _transaction(client, product, "IN", 7)
+    _assert_stock(client, product, 17)
+    _assert_stock(client, other, 10)
+    assert _get_json(client, "/transactions") == [transaction]
+
+
+def test_stock_decreases_after_out_transaction(client):
+    product = _product(client)
+    other = _product(client, sku="OTHER-002")
+    first = _transaction(client, product, "OUT", 4)
+    _assert_stock(client, product, 6)
+    second = _transaction(client, product, "OUT", 6)
+    _assert_stock(client, product, 0)
+    _assert_stock(client, other, 10)
+    assert _get_json(client, "/transactions") == [first, second]
+
+
+def test_stock_cannot_go_negative(client):
+    product = _product(client)
+    accepted = _transaction(client, product, "OUT", 4)
+    _assert_stock(client, product, 6)
+    response = client.post("/transactions", json={
+        "product_id": product["id"], "type": "OUT", "quantity": 7,
+    })
+    _assert_error(response, 400)
+    _assert_stock(client, product, 6)
+    assert _get_json(client, "/transactions") == [accepted]
+
+
+@pytest.mark.parametrize("tx_type", ["IN", "OUT"])
+@pytest.mark.parametrize("quantity", [0, -5], ids=["zero", "negative"])
+def test_transaction_zero_or_negative_quantity_rejected(client, tx_type, quantity):
+    product = _product(client)
+    response = client.post("/transactions", json={
+        "product_id": product["id"], "type": tx_type, "quantity": quantity,
+    })
+    _assert_error(response, 400)
+    _assert_stock(client, product, 10)
+    assert _get_json(client, "/transactions") == []
+
+
+def test_transaction_invalid_type_rejected(client):
+    product = _product(client)
+    response = client.post("/transactions", json={
+        "product_id": product["id"], "type": "SIDEWAYS", "quantity": 3,
+    })
+    _assert_error(response, 400)
+    _assert_stock(client, product, 10)
+    assert _get_json(client, "/transactions") == []
+
+
+def test_transaction_nonexistent_product_404(client):
+    product = _product(client)
+    response = client.post("/transactions", json={
+        "product_id": 9999, "type": "IN", "quantity": 3,
+    })
+    _assert_error(response, 404)
+    _assert_stock(client, product, 10)
+    assert _get_json(client, "/transactions") == []
+
+
+def test_record_transaction_via_ui_form(client):
+    product = _product(client)
+    data = dict(product_id=product["id"], type="OUT", quantity=3, supplier_id="")
+    response = client.post("/ui/transactions", data=data, follow_redirects=True)
+    assert response.status_code == 200
+    _assert_stock(client, product, 7)
+    history = _get_json(client, "/transactions")
+    assert len(history) == 1
+    assert {key: history[0][key] for key in data} == data | {"supplier_id": None}

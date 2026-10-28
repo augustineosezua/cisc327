@@ -37,6 +37,8 @@ app working without a REST client, and calls the same in-memory store.
 - **Product**: `id, name, sku, unit_price, quantity_on_hand`
 - **Supplier**: `id, name, contact_email`
 - **Transaction**: `id, product_id, supplier_id, type (IN/OUT), quantity, transaction_date`
+- **PurchaseOrder**: `id, supplier_id, product_id, quantity_ordered, status,
+  created_date, received_date, quantity_received, quantity_difference, clerk_id`
 
 ## JSON API Endpoints
 
@@ -55,9 +57,46 @@ app working without a REST client, and calls the same in-memory store.
 | DELETE | `/suppliers/<id>` | Delete a supplier |
 | POST | `/transactions` | Record a stock movement (`product_id`, `type`: IN/OUT, `quantity`, optional `supplier_id`) |
 | GET | `/transactions?product_id=&supplier_id=` | Look up transactions |
+| POST | `/purchase-orders` | Create a pending order (`supplier_id`, `product_id`, `quantity_ordered`) |
+| GET | `/purchase-orders` | List purchase orders, including receipt details |
+| GET | `/purchase-orders/<id>` | Get a purchase order and its receipt details |
+| PUT | `/purchase-orders/<id>/receive` | Receive actual units (`quantity_received`, optional `clerk_id`) and update stock |
+
+## Receiving a purchase order (R3, R4, R9)
+
+Send a JSON body to `PUT /purchase-orders/<id>/receive`:
+
+```json
+{"quantity_received": 40, "clerk_id": "C7"}
+```
+
+For an order of 50 units, this adds **40** units to the product's existing stock
+and records one IN transaction for 40. The response and subsequent PO GETs
+retain `quantity_ordered: 50` and store `quantity_received: 40`,
+`quantity_difference: 10`, `clerk_id: "C7"`, the receipt date (`YYYY-MM-DD`),
+and `status: "received"`.
+
+`quantity_difference` is ordered minus received: positive means a short
+delivery, zero means a full delivery, and negative means extra units arrived.
+Receipt fields are `null` while an order is pending. `clerk_id` is recorded when
+supplied and otherwise remains `null`.
+
+The received quantity must be a positive JSON integer. A missing quantity,
+zero, negative number, fraction, boolean, or text value returns HTTP 400.
+A missing or invalid JSON object also returns 400. An unknown order or an
+order whose product was deleted returns 404. Rejection leaves the order,
+inventory, and transaction history unchanged.
+
+Each PO can be received once, including a short delivery. A repeated receive
+returns 400 without adding stock or another transaction. Receiving without
+a body is no longer supported; callers must provide `quantity_received`.
 
 ## Tests
 
 ```bash
-pytest
+python -m pytest -v
 ```
+
+The tests in `tests/augustine-ivan-tests.py` cover receipt discrepancies,
+stock updates, repeated receipts, and invalid quantities. `pytest.ini` includes
+this filename in normal test discovery.

@@ -45,6 +45,8 @@ app working without a REST client, and calls the same in-memory store.
 | Method | Path | Description |
 |---|---|---|
 | GET | `/products` | List all products |
+| GET | `/products?sku=HAM-01` | Search by exact, case-sensitive SKU |
+| GET | `/products?name=hammer` | Search by case-insensitive partial name |
 | POST | `/products` | Create a product |
 | GET | `/products/<id>` | Get one product |
 | PUT | `/products/<id>` | Update a product |
@@ -61,6 +63,14 @@ app working without a REST client, and calls the same in-memory store.
 | GET | `/purchase-orders` | List purchase orders, including receipt details |
 | GET | `/purchase-orders/<id>` | Get a purchase order and its receipt details |
 | PUT | `/purchase-orders/<id>/receive` | Receive actual units (`quantity_received`, optional `clerk_id`) and update stock |
+
+## Product search (R3, R11)
+
+Search results include the full product data, including `quantity_on_hand`.
+For example, `?name=hammer` matches both `Claw Hammer` and `HAMMER Drill`.
+SKU matching is exact: `?sku=HAM-01` does not match `HAM-010` or `ham-01`.
+When both filters are supplied, a product must match both. No matches returns
+`[]`; omitting the filters returns all products.
 
 ## Receiving a purchase order (R3, R4, R9)
 
@@ -97,6 +107,6 @@ a body is no longer supported; callers must provide `quantity_received`.
 python -m pytest -v
 ```
 
-The tests in `tests/augustine-ivan-tests.py` cover receipt discrepancies,
+The tests in `tests/augustine-ivan-tests.py` cover search, receipt discrepancies,
 stock updates, repeated receipts, and invalid quantities. `pytest.ini` includes
 this filename in normal test discovery.

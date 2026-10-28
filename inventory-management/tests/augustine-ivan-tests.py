@@ -88,6 +88,38 @@ def test_list_products_returns_all_created(client):
     assert sorted(products, key=lambda item: item["id"]) == [first, second]
 
 
+@pytest.mark.parametrize("sku", ["HAM-01", "ham-01", "HAM"])
+def test_search_product_by_sku(client, sku):
+    product = _product(client, name="Claw Hammer", sku="HAM-01")
+    _product(client, name="HAM-01", sku="HAM-010")
+    expected = [product] if sku == "HAM-01" else []
+    assert _get_json(client, "/products", query_string={"sku": sku}) == expected
+    assert _get_json(client, f"/products/{product['id']}") == product
+
+
+def test_search_product_by_name(client):
+    first = _product(client, name="Claw Hammer", sku="HAM-01")
+    second = _product(client, name="HAMMER Drill", sku="DRILL-02")
+    _product(client, name="Mallet", sku="HAMMER-03")
+    results = _get_json(client, "/products", query_string={"name": "hAmMeR"})
+    assert sorted(results, key=lambda item: item["id"]) == [first, second]
+
+
+@pytest.mark.parametrize("query", [{"sku": "MISSING"}, {"name": "screwdriver"}])
+def test_product_search_no_match(client, query):
+    _product(client, name="Hammer", sku="HAM-01")
+    assert _get_json(client, "/products", query_string=query) == []
+
+
+def test_product_search_combines_filters(client):
+    product = _product(client, name="Claw Hammer", sku="HAM-01")
+    _product(client, name="Hammer Drill", sku="HAM-02")
+    query = {"sku": "HAM-01", "name": "hammer"}
+    assert _get_json(client, "/products", query_string=query) == [product]
+    query["name"] = "drill"
+    assert _get_json(client, "/products", query_string=query) == []
+
+
 def test_create_product_persists_all_fields(client):
     product = _product(client, quantity_on_hand=25, reorder_level=5)
     assert _get_json(client, f"/products/{product['id']}") == product

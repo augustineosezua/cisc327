@@ -47,6 +47,20 @@ def _supplier(client, **changes):
     return _create(client, "/suppliers", **(data | changes))
 
 
+def _purchase_order(client, product, supplier, quantity=20):
+    return _create(client, "/purchase-orders", product_id=product["id"],
+                   supplier_id=supplier["id"], quantity_ordered=quantity)
+
+
+def _assert_receipt_transaction(client, order, quantity):
+    history = _get_json(client, "/transactions")
+    expected = dict(product_id=order["product_id"], supplier_id=order["supplier_id"],
+                    type="IN", quantity=quantity)
+    assert len(history) == 1
+    assert {key: history[0][key] for key in expected} == expected
+    return history
+
+
 # Home page
 
 def test_home_page_links_to_all_sections(client):
@@ -387,3 +401,94 @@ def test_filter_transactions_by_product(client):
     results = _get_json(client, "/transactions", query_string={"product_id": product["id"]})
     assert results == [first, second]
     assert _get_json(client, "/transactions") == [first, unrelated, second]
+
+
+# Purchase orders
+
+def test_create_purchase_order_is_pending(client):
+    product = _product(client)
+    supplier = _supplier(client)
+    order = _purchase_order(client, product, supplier)
+    assert order["status"] == "pending"
+    assert order["received_date"] is None
+    assert order["created_date"]
+    assert _get_json(client, f"/purchase-orders/{order['id']}") == order
+    assert _get_json(client, "/purchase-orders") == [order]
+    _assert_stock(client, product, 10)
+    assert _get_json(client, "/transactions") == []
+
+
+@pytest.mark.parametrize("missing_field", ["supplier_id", "product_id"])
+def test_create_po_nonexistent_supplier_or_product_404(client, missing_field):
+    product = _product(client)
+    supplier = _supplier(client)
+    payload = {
+        "product_id": product["id"], "supplier_id": supplier["id"],
+        "quantity_ordered": 20,
+    }
+    payload[missing_field] = 9999
+    _assert_error(client.post("/purchase-orders", json=payload), 404)
+    assert _get_json(client, "/purchase-orders") == []
+    assert _get_json(client, "/transactions") == []
+    _assert_stock(client, product, 10)
+    assert _get_json(client, f"/suppliers/{supplier['id']}") == supplier
+
+
+def test_list_purchase_orders_returns_all(client):
+    product = _product(client)
+    other = _product(client, sku="OTHER-002")
+    supplier = _supplier(client)
+    first = _purchase_order(client, product, supplier, quantity=20)
+    second = _purchase_order(client, other, supplier, quantity=7)
+    orders = _get_json(client, "/purchase-orders")
+    assert sorted(orders, key=lambda item: item["id"]) == [first, second]
+
+
+def test_get_nonexistent_po_returns_404(client):
+    product = _product(client)
+    supplier = _supplier(client)
+    order = _purchase_order(client, product, supplier)
+    _assert_error(client.get("/purchase-orders/9999"), 404)
+    assert _get_json(client, "/purchase-orders") == [order]
+
+
+def test_receive_purchase_order_updates_stock(client):
+    product = _product(client)
+    order = _purchase_order(client, product, _supplier(client))
+    url = f"/purchase-orders/{order['id']}"
+    response = client.put(f"{url}/receive")
+    assert response.status_code == 200
+    received = response.get_json()
+    assert received["status"] == "received"
+    assert received["received_date"]
+    assert _get_json(client, url) == received
+    _assert_receipt_transaction(client, order, 20)
+    _assert_stock(client, product, 30)
+
+
+def test_receive_purchase_order_twice_rejected(client):
+    product = _product(client)
+    order = _purchase_order(client, product, _supplier(client))
+    url = f"/purchase-orders/{order['id']}"
+    first = client.put(f"{url}/receive")
+    assert first.status_code == 200
+    history = _assert_receipt_transaction(client, order, 20)
+    stock = _get_json(client, f"/products/{product['id']}")["quantity_on_hand"]
+    _assert_error(client.put(f"{url}/receive"), 400)
+    assert _get_json(client, url) == first.get_json()
+    assert _get_json(client, "/transactions") == history
+    _assert_stock(client, product, stock)
+
+
+def test_receive_partial_purchase_order(client):
+    # quantity_received is assumed; partial receipts have no documented input format.
+    product = _product(client)
+    order = _purchase_order(client, product, _supplier(client))
+    url = f"/purchase-orders/{order['id']}"
+    response = client.put(f"{url}/receive", json={"quantity_received": 7})
+    assert response.status_code == 200
+    received = response.get_json()
+    assert received["quantity_ordered"] == 20
+    assert _get_json(client, url) == received
+    _assert_stock(client, product, 17)
+    _assert_receipt_transaction(client, order, 7)

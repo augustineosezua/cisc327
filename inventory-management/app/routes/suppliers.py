@@ -13,7 +13,9 @@ def list_suppliers():
 
 @suppliers_bp.route("", methods=["POST"])
 def create_supplier():
-    data = request.get_json()
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not data.get("name") or not data.get("contact_email"):
+        return jsonify({"error": "name and contact_email are required"}), 400
     supplier_id = store.next_id("supplier")
     supplier = Supplier(id=supplier_id, name=data["name"], contact_email=data["contact_email"])
     store.suppliers[supplier_id] = supplier

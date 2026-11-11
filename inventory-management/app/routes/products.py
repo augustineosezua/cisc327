@@ -30,14 +30,22 @@ def low_stock():
 
 @products_bp.route("", methods=["POST"])
 def create_product():
-    data = request.get_json()
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not data.get("name") or not data.get("sku"):
+        return jsonify({"error": "name and sku are required"}), 400
+    quantity = data.get("quantity_on_hand", 0)
+    if type(quantity) is not int or quantity < 0:
+        return jsonify({"error": "quantity_on_hand must be a non-negative integer"}), 400
+    if any(p.sku == data["sku"] for p in store.products.values()):
+        return jsonify({"error": "A product with this SKU already exists"}), 409
+
     product_id = store.next_id("product")
     product = Product(
         id=product_id,
         name=data["name"],
         sku=data["sku"],
         unit_price=data.get("unit_price", 0.0),
-        quantity_on_hand=data.get("quantity_on_hand", 0),
+        quantity_on_hand=quantity,
         reorder_level=data.get("reorder_level", 0),
     )
     store.products[product_id] = product

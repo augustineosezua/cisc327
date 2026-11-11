@@ -2,6 +2,7 @@ from flask import Blueprint, jsonify, request
 
 from app import store
 from app.models.transaction import Transaction
+from notification_service import send_notification
 
 transactions_bp = Blueprint("transactions", __name__, url_prefix="/transactions")
 
@@ -44,4 +45,19 @@ def create_transaction():
         quantity=quantity,
     )
     store.transactions[transaction_id] = transaction
-    return jsonify(transaction.to_dict()), 201
+
+    notification_status = "not_required"
+
+    if tx_type == "OUT" and product.quantity_on_hand <= product.reorder_level:
+        sent = send_notification(
+            "inventory-staff@example.com",
+            "Low stock alert",
+            f"Product {product.name} (SKU: {product.sku}) has "
+            f"{product.quantity_on_hand} units remaining. "
+            f"Reorder level: {product.reorder_level}.",
+        )
+        notification_status = "sent" if sent else "failed"
+
+    response = jsonify(transaction.to_dict())
+    response.headers["X-Notification-Status"] = notification_status
+    return response, 201

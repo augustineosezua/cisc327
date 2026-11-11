@@ -87,3 +87,75 @@ def test_low_stock_notification_success_mock_at_threshold(client):
 
     transactions = client.get("/transactions").get_json()
     assert transactions == [transaction]
+
+def test_update_missing_supplier_returns_404(client):
+    # Create an existing supplier to check that it stays unchanged.
+    created = client.post("/suppliers", json={
+        "name": "Existing Supplier",
+        "contact_email": "supplier@example.com",
+    })
+    assert created.status_code == 201
+    supplier = created.get_json()
+    assert supplier["id"] != 999
+
+    response = client.put("/suppliers/999", json={
+        "name": "Changed Name",
+        "contact_email": "changed@example.com",
+    })
+
+    assert response.status_code == 404
+    assert response.get_json() == {"error": "Supplier not found"}
+
+    # The failed update must not create or modify a supplier.
+    suppliers = client.get("/suppliers").get_json()
+    assert suppliers == [supplier]
+
+
+def test_products_for_missing_supplier_returns_404(client):
+    created = client.post("/products", json={
+        "name": "Desk Lamp",
+        "sku": "MISSING-SUPPLIER-001",
+        "unit_price": 20.0,
+        "quantity_on_hand": 10,
+        "reorder_level": 5,
+    })
+    assert created.status_code == 201
+    product = created.get_json()
+
+    response = client.get("/suppliers/999/products")
+
+    assert response.status_code == 404
+    assert response.get_json() == {"error": "Supplier not found"}
+
+    # The request must leave products unchanged and create no supplier.
+    assert client.get("/products").get_json() == [product]
+    assert client.get("/suppliers").get_json() == []
+
+
+def test_receive_missing_purchase_order_returns_404(client):
+    created = client.post("/products", json={
+        "name": "Desk Lamp",
+        "sku": "MISSING-ORDER-001",
+        "unit_price": 20.0,
+        "quantity_on_hand": 10,
+        "reorder_level": 5,
+    })
+    assert created.status_code == 201
+    product = created.get_json()
+
+    response = client.put("/purchase-orders/999/receive", json={
+        "quantity_received": 5,
+    })
+
+    assert response.status_code == 404
+    assert response.get_json() == {
+        "error": "Purchase order not found"
+    }
+
+    # Receiving a nonexistent order must not change stock or create records.
+    updated_product = client.get(
+        f"/products/{product['id']}"
+    ).get_json()
+    assert updated_product == product
+    assert client.get("/transactions").get_json() == []
+    assert client.get("/purchase-orders").get_json() == []
